@@ -811,7 +811,7 @@ impl From<CliEditor> for openshell_cli::ssh::Editor {
 #[derive(Subcommand, Debug)]
 enum ProviderCommands {
     /// Create a provider config.
-    #[command(group = clap::ArgGroup::new("cred_source").required(true).args(["from_existing", "credentials", "from_gcloud_adc", "runtime_credentials"]), help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    #[command(group = clap::ArgGroup::new("cred_source").required(true).args(["from_existing", "credentials", "from_gcloud_adc", "runtime_credentials", "login_xai_oauth"]), help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
     Create {
         /// Provider name.
         #[arg(long)]
@@ -822,26 +822,31 @@ enum ProviderCommands {
         provider_type: String,
 
         /// Load provider credentials/config from existing local state.
-        #[arg(long, conflicts_with_all = ["credentials", "from_gcloud_adc", "runtime_credentials"])]
+        #[arg(long, conflicts_with_all = ["credentials", "from_gcloud_adc", "runtime_credentials", "login_xai_oauth"])]
         from_existing: bool,
 
         /// Provider credential pair (`KEY=VALUE`) or env lookup key (`KEY`).
         #[arg(
             long = "credential",
             value_name = "KEY[=VALUE]",
-            conflicts_with_all = ["from_existing", "from_gcloud_adc", "runtime_credentials"]
+            conflicts_with_all = ["from_existing", "from_gcloud_adc", "runtime_credentials", "login_xai_oauth"]
         )]
         credentials: Vec<String>,
 
         /// Configure credentials from gcloud Application Default Credentials
         /// (`~/.config/gcloud/application_default_credentials.json`).
         /// Valid for providers whose profile declares an ADC-compatible credential.
-        #[arg(long, group = "cred_source", conflicts_with_all = ["from_existing", "credentials", "runtime_credentials"])]
+        #[arg(long, group = "cred_source", conflicts_with_all = ["from_existing", "credentials", "runtime_credentials", "login_xai_oauth"])]
         from_gcloud_adc: bool,
 
         /// Create a provider whose required credentials are resolved at runtime by the gateway/sandbox.
-        #[arg(long, conflicts_with_all = ["from_existing", "credentials", "from_gcloud_adc"])]
+        #[arg(long, conflicts_with_all = ["from_existing", "credentials", "from_gcloud_adc", "login_xai_oauth"])]
         runtime_credentials: bool,
+
+        /// Start an attended xAI device-code login and store an OpenShell-owned
+        /// Grok subscription grant. Does not import OpenClaw `xai` tokens.
+        #[arg(long, group = "cred_source", conflicts_with_all = ["from_existing", "credentials", "from_gcloud_adc", "runtime_credentials"])]
+        login_xai_oauth: bool,
 
         /// Provider config key/value pair.
         #[arg(long = "config", value_name = "KEY=VALUE")]
@@ -3353,6 +3358,7 @@ async fn run_async() -> Result<()> {
                     credentials,
                     from_gcloud_adc,
                     runtime_credentials,
+                    login_xai_oauth,
                     config,
                     global_profile,
                 } => {
@@ -3365,6 +3371,7 @@ async fn run_async() -> Result<()> {
                         &credentials,
                         from_gcloud_adc,
                         runtime_credentials,
+                        login_xai_oauth,
                         &config,
                         &cli.workspace,
                         profile_ws,
@@ -4716,6 +4723,7 @@ mod tests {
                         credentials,
                         from_gcloud_adc,
                         runtime_credentials,
+                        login_xai_oauth,
                         ..
                     }),
             }) => {
@@ -4725,6 +4733,7 @@ mod tests {
                 assert!(credentials.is_empty());
                 assert!(!from_gcloud_adc);
                 assert!(runtime_credentials);
+                assert!(!login_xai_oauth);
             }
             other => panic!("expected provider create command, got: {other:?}"),
         }
@@ -4769,6 +4778,59 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("--credential"));
         assert!(msg.contains("--from-gcloud-adc"));
+    }
+
+    #[test]
+    fn provider_create_accepts_login_xai_oauth() {
+        let cli = Cli::try_parse_from([
+            "openshell",
+            "provider",
+            "create",
+            "--name",
+            "grok-sub",
+            "--type",
+            "grok-subscription",
+            "--login-xai-oauth",
+        ])
+        .expect("provider create should parse xAI login");
+
+        match cli.command {
+            Some(Commands::Provider {
+                command:
+                    Some(ProviderCommands::Create {
+                        name,
+                        provider_type,
+                        login_xai_oauth,
+                        from_existing,
+                        ..
+                    }),
+            }) => {
+                assert_eq!(name, "grok-sub");
+                assert_eq!(provider_type, "grok-subscription");
+                assert!(login_xai_oauth);
+                assert!(!from_existing);
+            }
+            other => panic!("expected provider create command, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_create_rejects_login_xai_oauth_with_from_existing() {
+        let err = Cli::try_parse_from([
+            "openshell",
+            "provider",
+            "create",
+            "--name",
+            "grok-sub",
+            "--type",
+            "grok-subscription",
+            "--login-xai-oauth",
+            "--from-existing",
+        ])
+        .expect_err("clap should reject importing host xAI tokens with login");
+
+        let msg = err.to_string();
+        assert!(msg.contains("--login-xai-oauth") || msg.contains("--from-existing"));
     }
 
     #[test]

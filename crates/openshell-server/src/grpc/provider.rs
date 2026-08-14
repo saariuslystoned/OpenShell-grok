@@ -1969,9 +1969,13 @@ fn provider_credential_not_expired(provider: &Provider, key: &str, now_ms: i64) 
 }
 
 fn is_non_injectable_provider_credential(provider: &Provider, key: &str) -> bool {
-    openshell_core::inference::normalize_inference_provider_type(&provider.r#type)
+    if openshell_core::inference::normalize_inference_provider_type(&provider.r#type)
         == Some("google-vertex-ai")
         && key == "GOOGLE_SERVICE_ACCOUNT_KEY"
+    {
+        return true;
+    }
+    openshell_core::xai_grok_oauth::is_sandbox_non_injectable_credential(&provider.r#type, key)
 }
 
 pub(super) fn is_valid_env_key(key: &str) -> bool {

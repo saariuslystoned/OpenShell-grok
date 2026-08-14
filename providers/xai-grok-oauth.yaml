@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id: xai-grok-oauth
+display_name: Grok Subscription
+description: Experimental gateway-owned xAI Grok subscription OAuth (SuperGrok / X Premium). Inference only. Do not import an OpenClaw xai refresh token.
+category: inference
+inference_capable: true
+credentials:
+  - name: access_token
+    description: Short-lived xAI OAuth access token used only by inference.local; not injected into sandboxes
+    env_vars: [XAI_GROK_ACCESS_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+    refresh:
+      strategy: oauth2_refresh_token
+      token_url: https://auth.x.ai/oauth2/token
+      scopes: [openid, profile, email, offline_access, api:access, grok-cli:access]
+      refresh_before_seconds: 300
+      max_lifetime_seconds: 3600
+      material:
+        - name: client_id
+          description: Public xAI OAuth client id (experimental compatibility boundary)
+          required: true
+        - name: refresh_token
+          description: OpenShell-owned xAI refresh token
+          required: true
+          secret: true
+discovery:
+  credentials: []
+endpoints: []
+binaries: []

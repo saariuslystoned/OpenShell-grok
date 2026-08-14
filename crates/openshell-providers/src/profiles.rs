@@ -36,6 +36,7 @@ const BUILT_IN_PROFILE_YAMLS: &[&str] = &[
     include_str!("../../../providers/google-vertex-ai.yaml"),
     include_str!("../../../providers/nvidia.yaml"),
     include_str!("../../../providers/pypi.yaml"),
+    include_str!("../../../providers/xai-grok-oauth.yaml"),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -2569,6 +2570,22 @@ mod tests {
             .iter()
             .find(|profile| profile.id == id)
             .unwrap_or_else(|| panic!("built-in profile {id} should exist"))
+    }
+
+    #[test]
+    fn xai_grok_oauth_profile_is_experimental_and_refreshable() {
+        let profile = builtin_profile("xai-grok-oauth");
+        assert_eq!(profile.id, "xai-grok-oauth");
+        assert!(profile.inference_capable);
+        assert!(profile.endpoints.is_empty());
+        let access = profile
+            .credentials
+            .iter()
+            .find(|credential| credential.name == "access_token")
+            .expect("access_token");
+        assert_eq!(access.env_vars, vec!["XAI_GROK_ACCESS_TOKEN".to_string()]);
+        let refresh = access.refresh.as_ref().expect("refresh");
+        assert_eq!(refresh.token_url, "https://auth.x.ai/oauth2/token");
     }
 
     #[test]

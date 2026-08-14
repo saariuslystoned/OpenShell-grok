@@ -42,6 +42,7 @@ pub mod settings;
 pub mod telemetry;
 pub mod time;
 pub mod transport_errors;
+pub mod xai_grok_oauth;
 
 pub use config::{
     ComputeDriverKind, Config, GatewayAuthConfig, GatewayInterceptorBindingOverride,
