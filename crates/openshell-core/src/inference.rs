@@ -177,6 +177,19 @@ static DEEPINFRA_PROFILE: InferenceProviderProfile = InferenceProviderProfile {
     passthrough_headers: &["x-model-id"],
 };
 
+/// Experimental Grok subscription profile. `base_url_config_keys` is empty so a
+/// hostile provider config cannot redirect the subscription bearer token.
+static XAI_GROK_OAUTH_PROFILE: InferenceProviderProfile = InferenceProviderProfile {
+    provider_type: crate::xai_grok_oauth::PROVIDER_TYPE,
+    default_base_url: crate::xai_grok_oauth::INFERENCE_BASE_URL,
+    protocols: OPENAI_PROTOCOLS,
+    credential_key_names: &[crate::xai_grok_oauth::ACCESS_TOKEN_KEY],
+    base_url_config_keys: &[],
+    auth: AuthHeader::Bearer,
+    default_headers: &[],
+    passthrough_headers: &["x-model-id"],
+};
+
 // AWS Bedrock — registered as bridge-fronted (no router-side auth
 // injection). Real AWS Bedrock requires `SigV4` signing of every request,
 // which is deferred to a follow-up PR (see #1704 thread). Until then,
@@ -226,6 +239,9 @@ pub fn normalize_inference_provider_type(input: &str) -> Option<&'static str> {
         "google-vertex-ai" | "vertex" | "vertex-ai" | "google-vertex" | "gcp-vertex" => {
             Some("google-vertex-ai")
         }
+        value if crate::xai_grok_oauth::is_xai_grok_oauth_type(value) => {
+            Some(crate::xai_grok_oauth::PROVIDER_TYPE)
+        }
         _ => None,
     }
 }
@@ -242,6 +258,7 @@ pub fn profile_for(provider_type: &str) -> Option<&'static InferenceProviderProf
         "deepinfra" => Some(&DEEPINFRA_PROFILE),
         "google-vertex-ai" => Some(&VERTEX_AI_PROFILE),
         "aws-bedrock" => Some(&AWS_BEDROCK_PROFILE),
+        crate::xai_grok_oauth::PROVIDER_TYPE => Some(&XAI_GROK_OAUTH_PROFILE),
         _ => None,
     }
 }
@@ -422,6 +439,23 @@ mod tests {
     }
 
     #[test]
+    fn profile_for_xai_grok_oauth_is_pinned() {
+        for key in ["xai-grok-oauth", "grok-subscription", "xai-oauth"] {
+            let profile = profile_for(key).expect("grok subscription profile");
+            assert_eq!(profile.provider_type, crate::xai_grok_oauth::PROVIDER_TYPE);
+            assert_eq!(
+                profile.default_base_url,
+                crate::xai_grok_oauth::INFERENCE_BASE_URL
+            );
+            assert!(profile.base_url_config_keys.is_empty());
+            assert_eq!(
+                profile.credential_key_names,
+                &[crate::xai_grok_oauth::ACCESS_TOKEN_KEY]
+            );
+        }
+    }
+
+    #[test]
     fn auth_for_anthropic_uses_custom_header() {
         let (auth, headers) = auth_for_provider_type("anthropic");
         assert_eq!(auth, AuthHeader::Custom("x-api-key"));
@@ -431,27 +465,21 @@ mod tests {
     #[test]
     fn route_headers_for_openai_include_passthrough_headers() {
         let (_, _, passthrough_headers) = route_headers_for_provider_type("openai");
-        assert!(
-            passthrough_headers
-                .iter()
-                .any(|name| name == "openai-organization")
-        );
+        assert!(passthrough_headers
+            .iter()
+            .any(|name| name == "openai-organization"));
         assert!(passthrough_headers.iter().any(|name| name == "x-model-id"));
     }
 
     #[test]
     fn route_headers_for_anthropic_include_passthrough_headers() {
         let (_, _, passthrough_headers) = route_headers_for_provider_type("anthropic");
-        assert!(
-            passthrough_headers
-                .iter()
-                .any(|name| name == "anthropic-version")
-        );
-        assert!(
-            passthrough_headers
-                .iter()
-                .any(|name| name == "anthropic-beta")
-        );
+        assert!(passthrough_headers
+            .iter()
+            .any(|name| name == "anthropic-version"));
+        assert!(passthrough_headers
+            .iter()
+            .any(|name| name == "anthropic-beta"));
     }
 
     #[test]
