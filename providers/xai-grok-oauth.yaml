@@ -16,7 +16,7 @@ credentials:
     refresh:
       strategy: oauth2_refresh_token
       token_url: https://auth.x.ai/oauth2/token
-      scopes: [grok-cli:access, offline_access]
+      scopes: [openid, profile, email, offline_access, api:access, grok-cli:access]
       refresh_before_seconds: 300
       max_lifetime_seconds: 3600
       material:

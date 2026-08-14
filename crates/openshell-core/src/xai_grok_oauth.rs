@@ -15,7 +15,7 @@
 use url::Url;
 
 /// Compatibility snapshot date for this experimental contract.
-pub const COMPAT_REVISION: &str = "2026-08-13.1";
+pub const COMPAT_REVISION: &str = "2026-08-14.1";
 
 /// Canonical provider profile id.
 pub const PROVIDER_TYPE: &str = "xai-grok-oauth";
@@ -54,8 +54,21 @@ pub const REVOCATION_URL: &str = "https://auth.x.ai/oauth2/revoke";
 /// until xAI publishes a first-party third-party integration contract.
 pub const PUBLIC_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 
-/// Device-code / refresh scopes. `offline_access` is required for a refresh token.
-pub const SCOPES: &[&str] = &["grok-cli:access", "offline_access"];
+/// Device-code / refresh scopes.
+///
+/// `api:access` is required by `https://api.x.ai` chat completions. A
+/// `grok-cli:access`-only grant is rejected with HTTP 403
+/// `OAuth2 token missing required scope: api:access`. `offline_access`
+/// is required for a refresh token. `openid`/`profile`/`email` match the
+/// published Grok CLI default grant.
+pub const SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "api:access",
+    "grok-cli:access",
+];
 
 const ALLOWED_INFERENCE_HOSTS: &[&str] = &["api.x.ai"];
 const ALLOWED_AUTH_HOSTS: &[&str] = &["auth.x.ai", "accounts.x.ai"];
@@ -164,5 +177,12 @@ mod tests {
             "openai",
             ACCESS_TOKEN_KEY
         ));
+    }
+
+    #[test]
+    fn grant_requests_api_access_for_pinned_inference_origin() {
+        assert!(SCOPES.contains(&"api:access"));
+        assert!(SCOPES.contains(&"offline_access"));
+        assert!(scope_param().contains("api:access"));
     }
 }

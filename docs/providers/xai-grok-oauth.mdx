@@ -22,7 +22,7 @@ openshell provider create \
   --login-xai-oauth
 ```
 
-The CLI prints a verification URL and user code. Finish sign-in in any browser. OpenShell stores the refresh token as non-injectable gateway refresh state.
+The CLI prints a verification URL and user code. Finish sign-in in any browser. OpenShell stores the refresh token as non-injectable gateway refresh state. The grant must include `api:access`; `grok-cli:access` alone is rejected by `https://api.x.ai` with HTTP 403. Refreshing an older grant does not add scopes — re-run `--login-xai-oauth`.
 
 Optional model pin:
 
