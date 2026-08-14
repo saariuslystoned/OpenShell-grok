@@ -3400,6 +3400,7 @@ pub async fn provider_create(
         credentials,
         from_gcloud_adc,
         false,
+        false,
         config,
         workspace,
         workspace,
@@ -3417,24 +3418,27 @@ pub async fn provider_create_with_options(
     credentials: &[String],
     from_gcloud_adc: bool,
     runtime_credentials: bool,
+    login_xai_oauth: bool,
     config: &[String],
     workspace: &str,
     profile_workspace: &str,
     tls: &TlsOptions,
 ) -> Result<()> {
-    if from_gcloud_adc && (from_existing || !credentials.is_empty() || runtime_credentials) {
+    if from_gcloud_adc
+        && (from_existing || !credentials.is_empty() || runtime_credentials || login_xai_oauth)
+    {
         return Err(miette::miette!(
-            "--from-gcloud-adc cannot be combined with --from-existing, --credential, or --runtime-credentials"
+            "--from-gcloud-adc cannot be combined with --from-existing, --credential, --runtime-credentials, or --login-xai-oauth"
         ));
     }
-    if from_existing && (!credentials.is_empty() || runtime_credentials) {
+    if from_existing && (!credentials.is_empty() || runtime_credentials || login_xai_oauth) {
         return Err(miette::miette!(
-            "--from-existing cannot be combined with --credential or --runtime-credentials"
+            "--from-existing cannot be combined with --credential, --runtime-credentials, or --login-xai-oauth"
         ));
     }
-    if runtime_credentials && !credentials.is_empty() {
+    if runtime_credentials && (!credentials.is_empty() || login_xai_oauth) {
         return Err(miette::miette!(
-            "--runtime-credentials cannot be combined with --credential"
+            "--runtime-credentials cannot be combined with --credential or --login-xai-oauth"
         ));
     }
 
@@ -3469,6 +3473,17 @@ pub async fn provider_create_with_options(
         }
     };
 
+    if openshell_core::xai_grok_oauth::is_xai_grok_oauth_type(&provider_type) && from_existing {
+        return Err(miette::miette!(
+            "refusing --from-existing for '{provider_type}': do not import an OpenClaw or host xAI refresh token. Use --login-xai-oauth to create an OpenShell-owned grant."
+        ));
+    }
+    if login_xai_oauth && !openshell_core::xai_grok_oauth::is_xai_grok_oauth_type(&provider_type) {
+        return Err(miette::miette!(
+            "--login-xai-oauth is only valid for --type grok-subscription (xai-grok-oauth)"
+        ));
+    }
+
     let adc_credential_key = if from_gcloud_adc {
         let profile = fetch_provider_profile(&mut client, &provider_type, profile_workspace)
             .await
@@ -3502,6 +3517,18 @@ pub async fn provider_create_with_options(
     let mut credential_map = parse_credential_pairs(credentials)?;
     let mut config_map = parse_key_value_pairs(config, "--config")?;
 
+    let xai_oauth_grant = if login_xai_oauth {
+        Some(crate::xai_grok_oauth_login::run_device_code_login().await?)
+    } else {
+        None
+    };
+    if let Some(grant) = &xai_oauth_grant {
+        credential_map.insert(
+            openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY.to_string(),
+            grant.access_token.clone(),
+        );
+    }
+
     if from_existing {
         let discovered =
             discover_existing_provider_data(&mut client, &provider_type, profile_workspace).await?;
@@ -3523,7 +3550,7 @@ pub async fn provider_create_with_options(
         if from_existing {
             return Err(missing_credentials_error(&provider_type));
         }
-        if !from_gcloud_adc && !runtime_credentials {
+        if !from_gcloud_adc && !runtime_credentials && !login_xai_oauth {
             return Err(missing_credentials_error(&provider_type));
         }
         let allows_empty_credentials = if runtime_credentials {
@@ -3641,6 +3668,48 @@ pub async fn provider_create_with_options(
 
         println!("{} Created provider {}", "✓".green().bold(), provider_name);
         println!("Configured GCP credentials from gcloud ADC and minted the initial access token");
+        return Ok(());
+    }
+
+    if let Some(grant) = xai_oauth_grant {
+        let expires_at_ms = grant.expires_in.filter(|value| *value > 0).map(|expires_in| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as i64)
+                .unwrap_or(0)
+                .saturating_add(expires_in.saturating_mul(1000))
+        });
+        let mut material = HashMap::new();
+        material.insert(
+            "client_id".to_string(),
+            openshell_core::xai_grok_oauth::PUBLIC_CLIENT_ID.to_string(),
+        );
+        material.insert("refresh_token".to_string(), grant.refresh_token);
+        if let Err(configure_err) = client
+            .configure_provider_refresh(ConfigureProviderRefreshRequest {
+                provider: provider_name.clone(),
+                credential_key: openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY.to_string(),
+                strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken as i32,
+                material,
+                secret_material_keys: vec!["refresh_token".to_string()],
+                expires_at_ms,
+                workspace: workspace.to_string(),
+            })
+            .await
+        {
+            return rollback_provider_create_after_gcloud_adc_failure(
+                &mut client,
+                &provider_name,
+                "configure xAI Grok OAuth refresh for",
+                &configure_err,
+                workspace,
+            )
+            .await;
+        }
+        println!("{} Created provider {}", "✓".green().bold(), provider_name);
+        println!(
+            "Stored an OpenShell-owned xAI Grok grant. Existing OpenClaw xAI logins were not used."
+        );
         return Ok(());
     }
 

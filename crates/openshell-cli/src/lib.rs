@@ -20,3 +20,4 @@ pub(crate) mod policy_update;
 pub mod run;
 pub mod ssh;
 pub mod tls;
+pub(crate) mod xai_grok_oauth_login;
