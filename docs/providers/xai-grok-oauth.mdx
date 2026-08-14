@@ -1,0 +1,62 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Grok Subscription"
+sidebar-title: "Grok Subscription"
+description: "Use a SuperGrok or X Premium subscription through a gateway-owned xAI OAuth grant. Experimental."
+keywords: "Generative AI, xAI, Grok, OAuth, SuperGrok, Inference Routing, OpenShell"
+---
+
+The `xai-grok-oauth` provider (`--type grok-subscription`) creates an **OpenShell-owned** xAI grant for SuperGrok or X Premium. The sandbox never receives the access token, refresh token, or account material. Agents call `https://inference.local`; the supervisor injects the bearer token only to `https://api.x.ai`.
+
+This provider is **experimental**. xAI publishes OIDC discovery and a device-code grant, but not a stable third-party client for OpenShell. Compatibility constants live in one module (`openshell_core::xai_grok_oauth`) and are revision-pinned.
+
+Do **not** import a live OpenClaw `xai` refresh token. Two refreshers sharing one rotating grant invalidate each other.
+
+## Create the provider
+
+```shell
+openshell provider create \
+  --name grok-sub \
+  --type grok-subscription \
+  --login-xai-oauth
+```
+
+The CLI prints a verification URL and user code. Finish sign-in in any browser. OpenShell stores the refresh token as non-injectable gateway refresh state.
+
+Optional model pin:
+
+```shell
+openshell provider create \
+  --name grok-sub \
+  --type grok-subscription \
+  --login-xai-oauth \
+  --config XAI_GROK_MODEL=grok-4.6
+```
+
+## Attach to a sandbox
+
+The grant is never a gateway-wide `inference.local` backend. Only a sandbox that has this exact provider attached receives the Grok route.
+
+```shell
+openshell sandbox create --name grok-agent --provider grok-sub -- openclaw
+# or attach later
+openshell sandbox provider attach grok-agent grok-sub
+```
+
+A sandbox attached only to a different provider, including a future Codex subscription provider, cannot use this Grok route.
+
+## Logout / revoke
+
+```shell
+openshell provider refresh delete grok-sub --credential-key XAI_GROK_ACCESS_TOKEN
+openshell provider delete grok-sub
+```
+
+Then revoke the grant in the xAI account settings. Re-login with `--login-xai-oauth` after `invalid_grant` or expiry that cannot refresh.
+
+## What this first slice does not do
+
+- Grok `web_search` / `x_search` / media APIs (same grant, later issue)
+- Importing OpenClaw host auth profiles
+- Honoring `XAI_BASE_URL` or other provider base-URL overrides
