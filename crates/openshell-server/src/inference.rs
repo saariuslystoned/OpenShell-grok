@@ -85,6 +85,7 @@ impl Inference for InferenceService {
             self.state.store.as_ref(),
             workspace,
             Some(&self.state.credentials),
+            Some(&sandbox),
         )
         .await
         .map(Response::new)
@@ -858,6 +859,15 @@ fn resolve_provider_route(
         )));
     }
 
+    if openshell_core::xai_grok_oauth::is_personal_subscription_provider_type(&provider_type)
+        && !openshell_core::xai_grok_oauth::is_allowed_inference_base_url(&base_url)
+    {
+        return Err(Status::failed_precondition(format!(
+            "provider '{name}' refused a non-pinned Grok subscription base URL",
+            name = provider.object_name()
+        )));
+    }
+
     Ok(ResolvedProviderRoute {
         provider_type,
         route: RouterResolvedRoute {
@@ -1014,26 +1024,175 @@ fn authorize_inference_bundle(
     }
 }
 
+fn attached_provider_names(sandbox: Option<&Sandbox>) -> Vec<String> {
+    sandbox
+        .and_then(|sandbox| sandbox.spec.as_ref())
+        .map(|spec| spec.providers.clone())
+        .unwrap_or_default()
+}
+
+async fn load_provider(
+    store: &Store,
+    workspace: &str,
+    credentials: Option<&crate::credentials::CredentialRuntime>,
+    name: &str,
+) -> Result<Option<Provider>, Status> {
+    let Some(provider) = store
+        .get_message_by_name::<Provider>(workspace, name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(resolve_provider_credentials(provider, credentials).await?))
+}
+
+fn subscription_access_token_usable(provider: &Provider, now_ms: i64) -> bool {
+    let Some(value) = provider
+        .credentials
+        .get(openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY)
+    else {
+        return false;
+    };
+    if value.trim().is_empty() {
+        return false;
+    }
+    provider
+        .credential_expires_at_ms
+        .get(openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY)
+        .is_none_or(|expires_at_ms| *expires_at_ms <= 0 || *expires_at_ms > now_ms)
+}
+
+fn subscription_model_id(provider: &Provider) -> String {
+    provider
+        .config
+        .get(openshell_core::xai_grok_oauth::MODEL_CONFIG_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(openshell_core::xai_grok_oauth::DEFAULT_MODEL)
+        .to_string()
+}
+
+async fn resolve_subscription_inference_route(
+    store: &Store,
+    workspace: &str,
+    credentials: Option<&crate::credentials::CredentialRuntime>,
+    sandbox: Option<&Sandbox>,
+) -> Result<Option<ResolvedRoute>, Status> {
+    let now_ms = current_time_ms();
+    for name in attached_provider_names(sandbox) {
+        let Some(provider) = load_provider(store, workspace, credentials, &name).await? else {
+            continue;
+        };
+        if !openshell_core::xai_grok_oauth::is_personal_subscription_provider_type(&provider.r#type)
+        {
+            continue;
+        }
+        if !subscription_access_token_usable(&provider, now_ms) {
+            return Ok(None);
+        }
+        return resolved_route_from_provider(&provider, CLUSTER_INFERENCE_ROUTE_NAME, &subscription_model_id(&provider));
+    }
+    Ok(None)
+}
+
+async fn resolve_cluster_inference_route_for_sandbox(
+    store: &Store,
+    workspace: &str,
+    credentials: Option<&crate::credentials::CredentialRuntime>,
+    sandbox: Option<&Sandbox>,
+) -> Result<Option<ResolvedRoute>, Status> {
+    let route = store
+        .get_message_by_name::<InferenceRoute>(workspace, CLUSTER_INFERENCE_ROUTE_NAME)
+        .await
+        .map_err(|e| Status::internal(format!("fetch route failed: {e}")))?;
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let Some(config) = route.config.as_ref() else {
+        return Ok(None);
+    };
+    if config.provider_name.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(provider) =
+        load_provider(store, workspace, credentials, &config.provider_name).await?
+    else {
+        return Ok(None);
+    };
+    if openshell_core::xai_grok_oauth::is_personal_subscription_provider_type(&provider.r#type) {
+        // Personal grants are never gateway-wide. An unattached sandbox must
+        // not inherit another sandbox's subscription route.
+        return Ok(None);
+    }
+    let _sandbox = sandbox;
+    resolve_route_by_name_with_credentials(
+        store,
+        workspace,
+        credentials,
+        CLUSTER_INFERENCE_ROUTE_NAME,
+    )
+    .await
+}
+
+fn resolved_route_from_provider(
+    provider: &Provider,
+    route_name: &str,
+    model_id: &str,
+) -> Result<Option<ResolvedRoute>, Status> {
+    let resolved = resolve_provider_route(provider, model_id)?;
+    Ok(Some(ResolvedRoute {
+        name: route_name.to_string(),
+        base_url: resolved.route.endpoint,
+        model_id: model_id.to_string(),
+        api_key: resolved.route.api_key,
+        protocols: resolved.route.protocols,
+        provider_type: resolved.provider_type,
+        timeout_secs: 0,
+        model_in_path: resolved.route.model_in_path,
+        request_path_override: resolved.route.request_path_override,
+    }))
+}
+
 /// Resolve the inference bundle (all managed routes + revision hash).
 #[cfg(test)]
 async fn resolve_inference_bundle(
     store: &Store,
     workspace: &str,
 ) -> Result<GetInferenceBundleResponse, Status> {
-    resolve_inference_bundle_with_credentials(store, workspace, None).await
+    resolve_inference_bundle_with_credentials(store, workspace, None, None).await
+}
+
+async fn resolve_inference_bundle_for_sandbox(
+    store: &Store,
+    workspace: &str,
+    sandbox: &Sandbox,
+) -> Result<GetInferenceBundleResponse, Status> {
+    resolve_inference_bundle_with_credentials(store, workspace, None, Some(sandbox)).await
 }
 
 async fn resolve_inference_bundle_with_credentials(
     store: &Store,
     workspace: &str,
     credentials: Option<&crate::credentials::CredentialRuntime>,
+    sandbox: Option<&Sandbox>,
 ) -> Result<GetInferenceBundleResponse, Status> {
     let mut routes = Vec::new();
-    if let Some(r) = resolve_route_by_name_with_credentials(
+    if let Some(r) = resolve_subscription_inference_route(
         store,
         workspace,
         credentials,
-        CLUSTER_INFERENCE_ROUTE_NAME,
+        sandbox,
+    )
+    .await?
+    {
+        routes.push(r);
+    } else if let Some(r) = resolve_cluster_inference_route_for_sandbox(
+        store,
+        workspace,
+        credentials,
+        sandbox,
     )
     .await?
     {
@@ -1648,6 +1807,98 @@ mod tests {
         assert_eq!(resp.routes[0].base_url, "https://api.openai.com/v1");
         assert!(!resp.revision.is_empty());
         assert!(resp.generated_at_ms > 0);
+    }
+
+    fn make_sandbox_with_providers(id: &str, providers: &[&str]) -> Sandbox {
+        Sandbox {
+            metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                id: id.to_string(),
+                name: id.to_string(),
+                created_at_ms: 1_000_000,
+                labels: HashMap::new(),
+                resource_version: 0,
+                annotations: HashMap::new(),
+                workspace: "default".to_string(),
+                deletion_timestamp_ms: 0,
+            }),
+            spec: Some(openshell_core::proto::SandboxSpec {
+                providers: providers.iter().map(|name| (*name).to_string()).collect(),
+                ..Default::default()
+            }),
+            status: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_subscription_route_requires_sandbox_attachment() {
+        let store = test_store().await;
+        let provider = make_provider(
+            "grok-sub",
+            "xai-grok-oauth",
+            openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY,
+            "xai-access",
+        );
+        store.put_message(&provider).await.expect("persist provider");
+        let route = make_route(CLUSTER_INFERENCE_ROUTE_NAME, "grok-sub", "grok-4.6");
+        store.put_message(&route).await.expect("persist route");
+
+        let unattached = make_sandbox_with_providers("sandbox-b", &[]);
+        let denied = resolve_inference_bundle_for_sandbox(&store, "default", &unattached)
+            .await
+            .expect("bundle should resolve");
+        assert!(
+            denied.routes.is_empty(),
+            "unattached sandbox must not receive a personal Grok route"
+        );
+
+        let attached = make_sandbox_with_providers("sandbox-a", &["grok-sub"]);
+        let allowed = resolve_inference_bundle_for_sandbox(&store, "default", &attached)
+            .await
+            .expect("bundle should resolve");
+        assert_eq!(allowed.routes.len(), 1);
+        assert_eq!(allowed.routes[0].provider_type, "xai-grok-oauth");
+        assert_eq!(allowed.routes[0].base_url, "https://api.x.ai/v1");
+        assert_eq!(allowed.routes[0].api_key, "xai-access");
+        assert_eq!(allowed.routes[0].model_id, "grok-4.6");
+    }
+
+    #[tokio::test]
+    async fn grok_subscription_expired_token_is_omitted() {
+        let store = test_store().await;
+        let mut provider = make_provider(
+            "grok-sub",
+            "xai-grok-oauth",
+            openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY,
+            "xai-access",
+        );
+        provider.credential_expires_at_ms.insert(
+            openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY.to_string(),
+            1,
+        );
+        store.put_message(&provider).await.expect("persist provider");
+        let attached = make_sandbox_with_providers("sandbox-a", &["grok-sub"]);
+        let bundle = resolve_inference_bundle_for_sandbox(&store, "default", &attached)
+            .await
+            .expect("bundle should resolve");
+        assert!(
+            bundle.routes.is_empty(),
+            "expired Grok grant must not remain in the supervisor bundle"
+        );
+    }
+
+    #[test]
+    fn grok_subscription_rejects_hostile_base_url() {
+        let mut provider = make_provider(
+            "grok-sub",
+            "xai-grok-oauth",
+            openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY,
+            "xai-access",
+        );
+        provider
+            .config
+            .insert("XAI_BASE_URL".to_string(), "https://evil.example/v1".to_string());
+        let resolved = resolve_provider_route(&provider, "grok-4.6").expect("pinned default");
+        assert_eq!(resolved.route.endpoint, "https://api.x.ai/v1");
     }
 
     #[tokio::test]

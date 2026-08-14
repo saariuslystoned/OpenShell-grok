@@ -741,6 +741,14 @@ async fn mint_oauth2_refresh_token(
     state: &StoredProviderCredentialRefreshState,
 ) -> Result<MintedCredential, Status> {
     let token_url = oauth2_token_url(state)?;
+    if state.credential_key == openshell_core::xai_grok_oauth::ACCESS_TOKEN_KEY
+        && !openshell_core::xai_grok_oauth::is_allowed_auth_url(&token_url)
+        && !is_loopback_http_token_url(&token_url)
+    {
+        return Err(Status::failed_precondition(
+            "xAI Grok refresh refused a non-pinned token URL",
+        ));
+    }
     let client_id = required_material(&state.material, "client_id")?;
     let refresh_token = required_material(&state.material, "refresh_token")?;
     let mut form = vec![
@@ -975,14 +983,14 @@ async fn request_token(
         .await
         .map_err(|e| Status::unavailable(format!("token endpoint request failed: {e}")))?;
     let status = response.status();
-    if !status.is_success() {
-        return Err(Status::failed_precondition(format!(
-            "token endpoint returned HTTP {status}"
-        )));
-    }
-    let token = response
-        .json::<TokenResponse>()
+    let body = response
+        .text()
         .await
+        .map_err(|_| Status::failed_precondition("token endpoint returned unreadable body"))?;
+    if !status.is_success() {
+        return Err(classify_oauth_token_http_error(status.as_u16(), &body));
+    }
+    let token = serde_json::from_str::<TokenResponse>(&body)
         .map_err(|_| Status::failed_precondition("token endpoint returned invalid JSON"))?;
     if token.access_token.trim().is_empty() {
         return Err(Status::failed_precondition(
@@ -1082,6 +1090,39 @@ fn material_value(material: &HashMap<String, String>, keys: &[&str]) -> Option<S
 
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_loopback_http_token_url(token_url: &str) -> bool {
+    reqwest::Url::parse(token_url)
+        .ok()
+        .is_some_and(|parsed| {
+            parsed.scheme() == "http" && parsed.host_str().is_some_and(is_loopback_host)
+        })
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthTokenErrorBody {
+    error: Option<String>,
+}
+
+fn classify_oauth_token_http_error(status: u16, body: &str) -> Status {
+    let error = serde_json::from_str::<OAuthTokenErrorBody>(body)
+        .ok()
+        .and_then(|parsed| parsed.error)
+        .unwrap_or_default();
+    let terminal = matches!(
+        error.as_str(),
+        "invalid_grant" | "invalid_client" | "unauthorized_client" | "access_denied"
+    );
+    match status {
+        408 | 429 | 500..=599 if !terminal => {
+            Status::unavailable(format!("token endpoint returned retryable HTTP {status}"))
+        }
+        _ if terminal => Status::failed_precondition(format!(
+            "token endpoint rejected the grant ({error}); re-authentication is required"
+        )),
+        _ => Status::failed_precondition(format!("token endpoint returned HTTP {status}")),
+    }
 }
 
 /// Test-only STS endpoint override. Reads the `sts_endpoint_url` material and
@@ -1222,9 +1263,9 @@ async fn run_refresh_worker_tick(
 #[cfg(test)]
 mod tests {
     use super::{
-        NewRefreshStateConfig, delete_refresh_state, get_refresh_state, new_refresh_state,
-        put_refresh_state, refresh_provider_credential, refresh_state_name, refresh_strategy_name,
-        run_refresh_worker_tick, seconds_until_ms,
+        NewRefreshStateConfig, classify_oauth_token_http_error, delete_refresh_state,
+        get_refresh_state, new_refresh_state, put_refresh_state, refresh_provider_credential,
+        refresh_state_name, refresh_strategy_name, run_refresh_worker_tick, seconds_until_ms,
     };
     use crate::credentials::CredentialRuntime;
     use crate::persistence::{current_time_ms, test_store};
@@ -1254,6 +1295,22 @@ mod tests {
             refresh_state_name(provider_id, "Alex-API"),
             refresh_state_name(provider_id, "alex-api")
         );
+    }
+
+    #[test]
+    fn oauth_token_errors_distinguish_retryable_from_terminal() {
+        let retryable = classify_oauth_token_http_error(429, "{}");
+        assert_eq!(retryable.code(), tonic::Code::Unavailable);
+        let timeout = classify_oauth_token_http_error(408, "{}");
+        assert_eq!(timeout.code(), tonic::Code::Unavailable);
+        let server = classify_oauth_token_http_error(503, "{}");
+        assert_eq!(server.code(), tonic::Code::Unavailable);
+        let terminal = classify_oauth_token_http_error(400, r#"{"error":"invalid_grant"}"#);
+        assert_eq!(terminal.code(), tonic::Code::FailedPrecondition);
+        assert!(terminal.message().contains("re-authentication"));
+        let other = classify_oauth_token_http_error(400, "{}");
+        assert_eq!(other.code(), tonic::Code::FailedPrecondition);
+        assert!(other.message().contains("HTTP 400"));
     }
 
     #[test]
